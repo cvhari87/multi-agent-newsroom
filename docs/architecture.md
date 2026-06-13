@@ -1,274 +1,353 @@
-# Parent-Child Multi-Agent Architecture
+# Architecture
 
 ## Overview
 
-The system uses one parent agent, the **Newsroom Editor**, to manage a team of
-specialized child agents. The parent owns the briefing goal and final decision.
-Children receive bounded assignments, use only the tools needed for their role,
-and return structured artifacts to the parent.
+Multi-Agent Newsroom is a parent-child multi-agent system. One **Newsroom Editor** (parent) controls the pipeline and makes all editorial decisions. Five **child agents** do specialist work: Research, Verification, Editorial, Writing, and Evaluation. A deterministic **Output service** publishes approved stories.
 
-Children do not call one another or publish directly. This keeps delegation,
-retries, and final accountability visible in one place.
+Children do not call each other and cannot publish directly. Every handoff goes through the parent, which keeps delegation, retries, and final accountability in one place.
 
-The parent is a logical role, not one long-running conversation. Complete
-artifacts and workflow state are persisted in SQLite. For each decision, the
-orchestrator gives the parent only the relevant assignment, compact result
-summary, scores, and blocking issues.
+---
 
-```text
-User / POST /api/run
-        |
-        v
-Parent: Newsroom Editor
-        |
-        +-- delegate --> Research Child
-        |
-        +-- delegate --> Verification Child
-        |
-        +-- delegate --> Editorial Child
-        |
-        +-- delegate --> Writing Child
-        |
-        +-- delegate --> Evaluation Child
-        |
-        +-- decide: publish, revise, reject, or fail run
-        |
-        v
-Deterministic Output Service --> SQLite + Markdown
+## High-level data flow
+
+```
+User / CLI / POST /api/run
+          │
+          ▼
+    Orchestrator (orchestrator.py)
+          │
+          ├─► Research Child ──────────────────► list[RawStory]
+          │                                            │
+          ├─► Verification Child ◄─────────────────── │
+          │        │                                   │
+          │        └─► list[VerificationPacket]        │
+          │                   │                        │
+          ├─► Parent: review_verification()            │
+          │        │  accept / reject per story        │
+          │        ▼                                   │
+          ├─► Editorial Child ─────────────────► list[EditorialPacket]  (max 8)
+          │                                            │
+          ├─► Writing Child (×4 concurrent) ◄──────── │
+          │        │                                   │
+          │        └─► list[WritingPacket]             │
+          │                   │                        │
+          ├─► Evaluation Child (concurrent) ◄───────── │
+          │        │                                   │
+          │        └─► list[EvaluationPacket]          │
+          │                   │                        │
+          ├─► Parent: review_evaluation()              │
+          │        │  approve / revise / reject        │
+          │        │  (max 2 revisions per story)      │
+          │        ▼                                   │
+          └─► Output Service ──────────────────► briefing.md + SQLite
 ```
 
-## Parent Agent: Newsroom Editor
+---
 
-The parent acts like an editor-in-chief and run orchestrator. It should reason
-about what work is needed, delegate it, inspect results, and decide what happens
-next. It should not perform every specialist task itself.
+## Agents
 
-### Responsibilities
+### Newsroom Editor (parent)
 
-- Translate the run request into a briefing goal and constraints.
-- Create assignments with explicit inputs, expected outputs, and acceptance criteria.
-- Invoke children in the correct order and preserve their structured artifacts.
-- Validate child outputs before passing them onward.
-- Ask a child to revise work when acceptance criteria are not met.
-- Reject unsupported or low-quality stories.
-- Decide which evaluated stories are approved for publication.
-- Record run status, decisions, failures, and retry reasons.
-- Call the deterministic output service only after approval.
+**File:** `src/newsroom/editor.py`  
+**Model:** `claude-sonnet-4-6`
 
-### Parent Rules
+The parent makes two types of decisions:
 
-- Never invent evidence or silently repair unsupported claims.
-- Never pass unvalidated free-form child output to another child.
-- Never keep the full run history or every full artifact in its prompt.
-- Load complete artifacts only when a decision specifically requires them.
-- Give revision requests to the child responsible for the problem.
-- Allow at most two revisions per assignment in the MVP.
-- Prefer partial success: publish approved stories if one child task fails.
-- Fail the run only when no publishable stories remain or a required service fails.
+| Method | When called | Decision |
+|--------|-------------|----------|
+| `review_verification()` | After Verification | Accept or reject each story (`confidence >= 0.5` + relevance) |
+| `review_evaluation()` | After Evaluation | Approve (score ≥ 7.0), revise (≥ 5.0), or reject (< 5.0) |
 
-### Parent Decisions
+Configuration:
+- `MAX_REVISIONS = 2` — maximum revision cycles per story
+- `PASS_SCORE = 7.0` — minimum eval score to approve
 
-| Child result | Parent action |
-| --- | --- |
-| Valid and meets acceptance criteria | Accept and delegate the next assignment |
-| Structurally invalid | Retry the same child with validation errors |
-| Missing evidence | Return to Research or Verification |
-| Weak angle or poor story selection | Return to Editorial |
-| Unsupported or unclear draft | Return to Writing with specific notes |
-| Evaluation score below 7.0 | Request one Writing revision, then reject if still below 7.0 |
-| Evaluation score at least 7.0 with valid citations | Approve for publication |
+Parent rules:
+- Never invents evidence or silently repairs unsupported claims
+- Never passes unvalidated child output to another child
+- Loads full artifacts only when a specific decision requires them
+- Prefers partial success: publishes approved stories even if some stories fail
+- Fails the run only when no publishable stories remain
 
-## Child Agents
-
-Each child is a specialist worker. A child acts only on the assignment supplied
-by the parent and returns a result plus enough metadata for the parent to judge
-it. A child may recommend an action, but it cannot decide the overall workflow.
+---
 
 ### Research Child
 
-**Goal:** Find candidate stories and collect source evidence.
+**File:** `src/newsroom/agents/research.py`  
+**Model:** `claude-sonnet-4-6`
 
-**Acts by:**
+Fetches and summarizes RSS stories.
 
-- Reading the configured RSS sources.
-- Normalizing article metadata and removing exact URL duplicates.
-- Returning candidate stories with source URLs and available summaries.
-- Reporting source failures instead of hiding them.
+**RSS feeds (hardcoded):**
 
-**Must not:** rank stories, estimate facts it cannot observe, or select stories
-for publication.
+| Feed | URL |
+|------|-----|
+| The Batch | `https://www.deeplearning.ai/the-batch/feed/` |
+| Import AI | `https://importai.substack.com/feed` |
+| Hacker News AI | `https://hnrss.org/newest?q=AI+engineering&points=50` |
+| The Gradient | `https://thegradient.pub/rss/` |
+| Ahead of AI | `https://magazine.sebastianraschka.com/feed` |
+
+**Process:**
+1. Fetch all 5 feeds concurrently (`ThreadPoolExecutor`)
+2. Download article HTML for each link (`httpx`, 8 s timeout, 6000 char limit)
+3. Summarize each article via Claude (8 concurrent workers)
+4. Deduplicate by URL
+5. Set `evidence_status` to `article_fetched` or `rss_fallback`
+
+**Output:** `list[RawStory]` (max 10 per feed)
+
+---
 
 ### Verification Child
 
-**Goal:** Assess whether each candidate is sufficiently supported.
+**File:** `src/newsroom/agents/verification.py`  
+**Model:** `claude-sonnet-4-6`
 
-**Acts by:**
+Scores confidence and detects cross-source coverage.
 
-- Comparing candidate stories and grouping likely coverage of the same event.
-- Assessing credibility using the supplied evidence.
-- Returning confidence, source agreement, unsupported claims, and caveats.
-- Recommending `accept`, `needs_research`, or `reject`.
+**Process:**
+1. Sends all candidate stories as JSON to Claude in one call
+2. Claude returns per-story: `confidence_score` (0–1), `supporting_urls`, `recommendation`, `caveats`
+3. Cross-references `supporting_urls` against other stories in the set
+4. Builds `VerifiedStory` with `cross_source_count` and `evidence_sources`
 
-**Must not:** fabricate cross-source coverage or rewrite the story.
+**Output:** `list[VerificationPacket]` with `{story, recommendation, caveats}`
+
+**Recommendations:** `accept` · `research_more` · `reject`
+
+---
 
 ### Editorial Child
 
-**Goal:** Select and frame the most useful verified stories for AI engineers.
+**File:** `src/newsroom/agents/editorial.py`  
+**Model:** `claude-sonnet-4-6`
 
-**Acts by:**
+Selects and frames the most useful stories for AI engineers.
 
-- Ranking only stories accepted by Verification.
-- Selecting up to eight stories.
-- Assigning topic tags and a specific editorial angle.
-- Explaining briefly why each selected story matters.
+**Process:**
+1. Receives all parent-accepted `VerifiedStory` objects
+2. Claude selects up to 8 stories, assigns each:
+   - `topic_tags` — one or more from the fixed tag set
+   - `angle` — one-sentence editorial framing
+   - `rank` — 1 = most important
+3. Parses JSON or Markdown-fenced output
 
-**Must not:** introduce new factual claims or weaken verification caveats.
+**Topic tags (fixed set):** `LLMs` · `Tooling` · `Infrastructure` · `Research` · `Safety` · `Agents` · `Data` · `Benchmarks` · `Open Source` · `Industry`
+
+**Output:** `list[EditorialPacket]` (max 8 stories)
+
+---
 
 ### Writing Child
 
-**Goal:** Draft a concise, cited briefing for each selected story.
+**File:** `src/newsroom/agents/writing.py`  
+**Model:** `claude-sonnet-4-6`
 
-**Acts by:**
+Drafts cited briefings for each selected story.
 
-- Writing 150-250 words using the approved angle and evidence.
-- Attaching citations to factual claims.
-- Preserving uncertainty and caveats from Verification.
-- Revising drafts in response to specific parent feedback.
+**Process:**
+1. Writes 150–250 words per story using the assigned angle and evidence
+2. Returns JSON: `{ full_briefing, sources_json: [{name, url}] }`
+3. Runs citation validation deterministically (`citations.py`)
+4. Accepts optional `revision_feedback` from the parent on retry
+5. Runs 4 stories concurrently (`ThreadPoolExecutor`)
 
-**Must not:** use sources outside the assignment or publish directly.
+**Output:** `list[WritingPacket]`
+
+---
 
 ### Evaluation Child
 
-**Goal:** Critique drafts independently before publication.
+**File:** `src/newsroom/agents/evaluation.py`  
+**Model:** `claude-sonnet-4-6`
 
-**Acts by:**
+Critiques drafts independently before publication.
 
-- Checking factual support, citation coverage, clarity, duplication, and relevance.
-- Returning a score from 0-10 and actionable issue list.
-- Identifying which child should address each issue.
-- Recommending `approve`, `revise`, or `reject`.
+**Process:**
+1. Claude evaluates each briefing: `eval_score` (0–10), `recommendation`, `issues`
+2. Deterministic citation check (via `citations.py`) is applied on top:
+   - No citations → score capped at 4.0
+   - Broken citation URLs → score reduced
+3. Final recommendation thresholds: approve ≥ 7.0, revise ≥ 5.0, reject < 5.0
 
-**Must not:** silently rewrite drafts or approve unsupported claims.
+**Output:** `list[EvaluationPacket]`
 
-## Structured Delegation Contract
+---
 
-Every parent-to-child assignment uses the same envelope:
+### Output Service
 
-```json
-{
-  "run_id": "uuid",
-  "task_id": "uuid",
-  "child": "verification",
-  "goal": "Verify the supplied candidate stories",
-  "inputs": {},
-  "constraints": [],
-  "acceptance_criteria": [],
-  "revision_number": 0
-}
+**File:** `src/newsroom/agents/output.py`  
+**Not an LLM agent — deterministic only**
+
+1. Writes `output/briefing-YYYY-MM-DD.md`
+2. Inserts each story into `db.stories` (UUID per story)
+3. Calls `db.complete_run()` with final metrics
+
+---
+
+## Deterministic services
+
+These are code, not agents:
+
+| Service | File | Purpose |
+|---------|------|---------|
+| Citation validator | `citations.py` | Extracts `[text](url)` links, checks all URLs exist in `supporting_sources` and `sources_json` |
+| JSON parser | `structured.py` | Strips Markdown fences, parses JSON arrays, validates required fields |
+| SQLite persistence | `db.py` | All reads and writes; source of truth for run state |
+| FastAPI layer | `api.py` | Four REST endpoints; serves static frontend in production |
+| CLI entry point | `cli.py` | `newsroom` command; runs full pipeline headless |
+
+---
+
+## Data models
+
+Defined in `src/newsroom/models.py` as TypedDicts. Each stage extends the previous:
+
+```
+RawStory
+  └── VerifiedStory     (+ confidence_score, cross_source_count, caveats)
+        └── EditorialStory  (+ angle, topic_tags, rank)
+              └── WrittenStory    (+ full_briefing, sources_json)
+                    └── EvaluatedStory  (+ eval_score, eval_notes)
 ```
 
-Every child-to-parent result uses this envelope:
+---
 
-```json
-{
-  "task_id": "uuid",
-  "status": "complete",
-  "artifact_ids": ["uuid"],
-  "summary": "Two independent sources support the announcement.",
-  "scores": {"confidence": 0.88},
-  "recommendation": "accept",
-  "issues": [],
-  "tool_errors": []
-}
-```
+## SQLite schema
 
-Complete artifacts are persisted separately and referenced by ID. The parent
-validates the compact result envelope and loads a complete artifact only when
-needed for a decision.
+**Database file:** `newsroom.db` (created automatically at project root)
 
-## State and Context Management
+### `runs`
 
-SQLite is the source of truth for run state. The parent does not rely on chat
-history as memory.
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | TEXT PK | UUID |
+| `status` | TEXT | `running` · `complete` · `failed` |
+| `started_at` | TEXT | ISO 8601 UTC |
+| `finished_at` | TEXT | ISO 8601 UTC (nullable) |
+| `story_count` | INTEGER | Approved stories published |
+| `eval_score_avg` | REAL | Average eval score across approved stories |
+| `briefing_path` | TEXT | Relative path to Markdown briefing |
 
-Persisted state includes:
+### `stories`
 
-- Runs, stage events, status transitions, and retry counts
-- Complete child artifacts, including revision artifacts
-- Parent decisions and reasons
-- Scores, issues, citations, and tool failures
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | TEXT PK | UUID |
+| `run_id` | TEXT FK | References `runs.id` |
+| `title` | TEXT | Story headline |
+| `url` | TEXT | Canonical article URL |
+| `summary` | TEXT | Research-stage summary |
+| `angle` | TEXT | Editorial angle (one sentence) |
+| `full_briefing` | TEXT | Published briefing (Markdown) |
+| `topic_tags` | TEXT | JSON array of tag strings |
+| `sources_json` | TEXT | JSON array of `{name, url}` citation objects |
+| `confidence_score` | REAL | Verification confidence (0–1) |
+| `cross_source_count` | INTEGER | Number of corroborating sources |
+| `eval_score` | REAL | Evaluation score (0–10) |
+| `eval_notes` | TEXT | QC notes from Evaluation child |
+| `published_at` | TEXT | ISO 8601 UTC |
+| `created_at` | TEXT | ISO 8601 UTC |
 
-Before invoking the parent, deterministic code builds a compact decision packet:
+### `run_events`
 
-```json
-{
-  "run_id": "uuid",
-  "decision": "review_evaluation",
-  "story_id": "uuid",
-  "artifact_ids": ["draft-uuid", "evaluation-uuid"],
-  "summary": "Draft scored 6.4 because two claims lack citations.",
-  "recommendation": "revise",
-  "blocking_issues": [
-    {"owner": "writing", "issue": "Add citations for benchmark claims"}
-  ]
-}
-```
+Audit trail of every pipeline stage transition, parent decision, and retry.
 
-This limits parent context, latency, and cost while preserving an auditable
-parent-child workflow.
+| Column | Type |
+|--------|------|
+| `id` | INTEGER PK |
+| `run_id` | TEXT FK |
+| `stage` | TEXT |
+| `event` | TEXT |
+| `details` | TEXT (JSON) |
+| `created_at` | TEXT |
 
-## Run Sequence
+### `artifacts`
 
-```text
-1. Parent creates run and briefing goal.
-2. Parent delegates collection to Research.
-3. Parent validates candidates and delegates them to Verification.
-4. Parent rejects unsupported candidates and delegates accepted stories to Editorial.
-5. Parent validates selections and delegates each selected story to Writing.
-6. Parent delegates each draft to Evaluation.
-7. Parent routes actionable issues back to the responsible child.
-8. Parent approves stories that pass evaluation.
-9. Parent calls deterministic output and persistence services.
-10. Parent completes the run with an audit trail of tasks and decisions.
-```
+Complete stage outputs stored by reference so the parent prompt stays small.
 
-The pipeline is ordered between stages, but work within a stage is concurrent:
+| Column | Type |
+|--------|------|
+| `id` | TEXT PK (UUID) |
+| `run_id` | TEXT FK |
+| `stage` | TEXT |
+| `payload` | TEXT (JSON) |
+| `created_at` | TEXT |
 
-- Fetch configured sources concurrently.
-- Verify independent story clusters concurrently.
-- Write selected stories concurrently.
-- Evaluate each draft as soon as it completes.
-- Publish approved stories after all active story tasks settle.
+---
 
-## Deterministic Services
+## REST API
 
-These operations are tools or application services, not agents:
+**File:** `src/newsroom/api.py`
 
-- RSS fetching and parsing
-- Schema validation
-- Exact URL deduplication
-- Building compact parent decision packets
-- Retry counting and task status transitions
-- SQLite reads and writes
-- Markdown rendering
-- Citation URL validation
-- API responses
+| Method | Path | Behaviour |
+|--------|------|-----------|
+| `POST` | `/api/run` | Starts pipeline in background thread. Returns `202 {run_id, status}`. Rejects concurrent runs with `409`. |
+| `GET` | `/api/runs` | All runs, newest first |
+| `GET` | `/api/stories` | Story cards. `?run_id=uuid` to select a run; defaults to latest completed. `?tag=X` to filter by topic tag. |
+| `GET` | `/api/stories/{id}` | Full story detail. Returns `404` if not found. |
 
-## Failure and Revision Behavior
+CORS is enabled for `localhost:5173` and `localhost:3000` (Vite dev servers).  
+In production the API serves `frontend/dist/` as static files.
 
-- A child returns tool failures in `tool_errors`; it does not conceal them.
-- The parent retries transient tool failures once.
-- Invalid structured output is returned to the same child for correction.
-- Evaluation issues are routed to the child that owns the faulty artifact.
-- The parent records every retry, rejection, and approval for the run.
-- Exhausted retries reject the affected story rather than blocking unrelated stories.
+---
 
-## Design Principles
+## Frontend
 
-- Make parent-child delegation visible and auditable.
-- Preserve source URLs and evidence throughout the workflow.
-- Use structured handoffs between parent and children.
-- Keep final editorial and publication decisions with the parent.
-- Use deterministic code for deterministic work.
-- Bound retries, token usage, and child authority.
-- Persist workflow state instead of relying on parent conversation memory.
+**Stack:** React 19 + Vite 8
+
+| File | Role |
+|------|------|
+| `App.jsx` | Root component: run trigger, polling, tag filter, story grid |
+| `api.js` | Thin HTTP client wrapping the 4 API endpoints |
+| `StoryCard.jsx` | Card grid item: title, summary, tags, eval score |
+| `StoryDetail.jsx` | Full story view: briefing (Markdown → HTML), citations |
+| `TagFilter.jsx` | Topic tag filter buttons |
+| `RunHistory.jsx` | Collapsible table of past runs; click a row to load that run |
+
+**Run trigger flow:**
+1. User clicks **▶ New Run** → `POST /api/run`
+2. Frontend polls `GET /api/stories` every 5 seconds
+3. Stories appear when the run completes (max poll duration: 5 minutes)
+
+---
+
+## Concurrency model
+
+Work within a pipeline stage runs concurrently; stages are sequential.
+
+| Stage | Concurrency |
+|-------|-------------|
+| Research — fetch feeds | `ThreadPoolExecutor` (one thread per feed) |
+| Research — summarize articles | `ThreadPoolExecutor` (8 workers) |
+| Writing — draft briefings | `ThreadPoolExecutor` (4 workers) |
+| Evaluation — score drafts | `ThreadPoolExecutor` (one per story) |
+| API — pipeline trigger | `threading.Thread` + `Lock` (one active run at a time) |
+
+---
+
+## Failure and revision behaviour
+
+| Condition | Action |
+|-----------|--------|
+| Verification confidence < 0.5 | Parent rejects story |
+| Invalid JSON from child | Returned to same child for correction |
+| Eval score < 5.0 | Story rejected; not retried |
+| Eval score 5.0–6.9 | Sent back to Writing with specific notes (max 2 revisions) |
+| Eval score ≥ 7.0 | Approved for publication |
+| Article fetch fails | Falls back to RSS summary (`evidence_status: rss_fallback`) |
+| One story fails | Other stories continue; partial success preferred |
+| No stories approved | Run marked `failed` |
+
+---
+
+## Design principles
+
+- **Parent owns every decision.** Children recommend; the parent decides.
+- **Structured handoffs.** Every child returns typed, validated JSON.
+- **Deterministic code for deterministic work.** Citation checking, deduplication, and persistence are never delegated to an LLM.
+- **Artifacts by reference.** Complete stage outputs are stored in SQLite and referenced by ID. Parent prompts stay compact.
+- **Auditable trail.** Every decision, retry, and rejection is recorded in `run_events`.
+- **Partial success.** Failing stories are rejected individually; passing stories are published regardless.
+- **Bounded retries.** Maximum 2 revisions per story; maximum 1 retry per transient tool failure.
