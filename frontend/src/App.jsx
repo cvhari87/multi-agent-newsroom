@@ -1,18 +1,34 @@
 import { useCallback, useEffect, useState } from 'react';
-import { fetchStories, triggerRun } from './api';
+import { cancelRun, fetchRuns, fetchStories, triggerRun } from './api';
 import TagFilter from './components/TagFilter';
 import StoryCard from './components/StoryCard';
 import StoryDetail from './components/StoryDetail';
 import RunHistory from './components/RunHistory';
 import './App.css';
 
+const STAGE_LABELS = {
+  starting: '🚀 Starting…',
+  research: '🔍 Research — fetching articles…',
+  verification: '✅ Verification — scoring confidence…',
+  editor_review: '📋 Editor — reviewing verification…',
+  editorial: '📰 Editorial — ranking stories…',
+  writing: '✍️ Writing — drafting briefings…',
+  evaluation: '⭐ Evaluation — scoring quality…',
+  revision_loop: '🔄 Revisions — improving drafts…',
+  output: '📄 Output — writing briefing file…',
+  done: '✅ Complete',
+  failed: '❌ Failed',
+  cancelled: '🚫 Cancelled',
+};
+
 export default function App() {
   const [stories, setStories] = useState([]);
   const [activeTag, setActiveTag] = useState(null);
   const [selectedStory, setSelectedStory] = useState(null);
   const [runId, setRunId] = useState(null);
+  const [activeRunId, setActiveRunId] = useState(null);
   const [running, setRunning] = useState(false);
-  const [runStatus, setRunStatus] = useState(null);
+  const [currentStage, setCurrentStage] = useState(null);
 
   const loadStories = useCallback(() => {
     fetchStories({ tag: activeTag, runId }).then(setStories);
@@ -22,30 +38,49 @@ export default function App() {
     loadStories();
   }, [loadStories]);
 
-  const handleTriggerRun = async () => {
-    setRunning(true);
-    setRunStatus(null);
-    try {
-      const result = await triggerRun();
-      setRunStatus(`Run ${result.run_id.slice(0, 8)} — ${result.status}`);
-      // Poll for completion
-      const poll = setInterval(async () => {
-        const updated = await fetchStories();
-        if (updated.length > 0 || result.status === 'already_running') {
-          clearInterval(poll);
+  // Poll for run progress when a run is active
+  useEffect(() => {
+    if (!running || !activeRunId) return;
+    const interval = setInterval(async () => {
+      const runs = await fetchRuns();
+      const active = runs.find((r) => r.id === activeRunId);
+      if (active) {
+        setCurrentStage(active.current_stage);
+        if (active.status !== 'running') {
           setRunning(false);
-          setRunId(null);
+          setActiveRunId(null);
+          setCurrentStage(null);
           loadStories();
         }
-      }, 5000);
-      // Stop polling after 5 minutes
-      setTimeout(() => {
-        clearInterval(poll);
-        setRunning(false);
-      }, 300000);
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [running, activeRunId, loadStories]);
+
+  const handleTriggerRun = async () => {
+    setRunning(true);
+    setCurrentStage('starting');
+    try {
+      const result = await triggerRun();
+      setActiveRunId(result.run_id);
+      if (result.status === 'already_running') {
+        setCurrentStage('already running');
+      }
     } catch {
-      setRunStatus('Failed to trigger run');
+      setCurrentStage('failed to start');
       setRunning(false);
+    }
+  };
+
+  const handleCancelRun = async () => {
+    if (!activeRunId) return;
+    try {
+      await cancelRun(activeRunId);
+      setRunning(false);
+      setCurrentStage('cancelled');
+      setActiveRunId(null);
+    } catch {
+      // ignore — run may have already finished
     }
   };
 
@@ -80,8 +115,17 @@ export default function App() {
           >
             {running ? '⏳ Running…' : '▶ New Run'}
           </button>
-          {runStatus && <span className="run-status">{runStatus}</span>}
+          {running && (
+            <button className="cancel-btn" onClick={handleCancelRun}>
+              ✕ Cancel
+            </button>
+          )}
         </div>
+        {currentStage && (
+          <div className={`stage-indicator${currentStage === 'failed' || currentStage === 'cancelled' ? ' error' : ''}`}>
+            {STAGE_LABELS[currentStage] || currentStage}
+          </div>
+        )}
       </header>
 
       <TagFilter active={activeTag} onChange={setActiveTag} />

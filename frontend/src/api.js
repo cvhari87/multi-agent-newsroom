@@ -7,6 +7,11 @@ export async function triggerRun() {
   return res.json();
 }
 
+export async function cancelRun(runId) {
+  const res = await fetch(`${BASE}/run/${runId}/cancel`, { method: 'POST' });
+  return res.json();
+}
+
 export async function fetchRuns() {
   const res = await fetch(`${BASE}/runs`);
   return (await res.json()).runs;

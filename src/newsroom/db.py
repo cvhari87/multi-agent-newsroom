@@ -23,6 +23,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS runs (
                 id            TEXT PRIMARY KEY,
                 status        TEXT NOT NULL DEFAULT 'running',
+                current_stage TEXT DEFAULT 'starting',
                 started_at    TEXT NOT NULL,
                 finished_at   TEXT,
                 story_count   INTEGER,
@@ -65,6 +66,11 @@ def init_db() -> None:
                 created_at  TEXT NOT NULL
             );
         """)
+        # Migrate: add current_stage column if missing (for existing DBs)
+        try:
+            conn.execute("SELECT current_stage FROM runs LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE runs ADD COLUMN current_stage TEXT DEFAULT 'starting'")
 
 
 def create_run(run_id: str) -> None:
@@ -72,10 +78,34 @@ def create_run(run_id: str) -> None:
     now = datetime.now(timezone.utc).isoformat()
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO runs (id, status, started_at) VALUES (?, 'running', ?)",
+            "INSERT INTO runs (id, status, current_stage, started_at) VALUES (?, 'running', 'starting', ?)",
             (run_id, now),
         )
     record_event(run_id, "run", "started", {})
+
+
+def update_stage(run_id: str, stage: str) -> None:
+    """Update the current pipeline stage for live progress tracking."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE runs SET current_stage=? WHERE id=?",
+            (stage, run_id),
+        )
+
+
+def cancel_run(run_id: str) -> bool:
+    """Mark a run as cancelled. Returns True if the run was running."""
+    with _connect() as conn:
+        row = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row is None or row["status"] != "running":
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "UPDATE runs SET status='cancelled', current_stage='cancelled', finished_at=? WHERE id=?",
+            (now, run_id),
+        )
+    record_event(run_id, "run", "cancelled", {})
+    return True
 
 
 def record_event(run_id: str, stage: str, event: str, details: dict) -> None:
@@ -108,9 +138,38 @@ def fail_run(run_id: str, error: str) -> None:
     record_event(run_id, "run", "failed", {"error": error})
     with _connect() as conn:
         conn.execute(
-            "UPDATE runs SET status='failed', finished_at=? WHERE id=?",
+            "UPDATE runs SET status='failed', current_stage='failed', finished_at=? WHERE id=?",
             (now, run_id),
         )
+
+
+def is_cancelled(run_id: str) -> bool:
+    """Check if a run has been cancelled."""
+    with _connect() as conn:
+        row = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+    return row is not None and row["status"] == "cancelled"
+
+
+def cleanup_orphaned_runs() -> int:
+    """Mark any 'running' runs as failed (orphaned by server restart).
+
+    Returns the number of runs cleaned up.
+    """
+    init_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id FROM runs WHERE status='running'"
+        ).fetchall()
+        if not rows:
+            return 0
+        for row in rows:
+            conn.execute(
+                "UPDATE runs SET status='failed', current_stage='failed', finished_at=? WHERE id=?",
+                (now, row["id"]),
+            )
+            record_event(row["id"], "run", "failed", {"error": "Orphaned by server restart"})
+    return len(rows)
 
 
 def insert_story(story: EvaluatedStory, run_id: str, story_id: str) -> None:
@@ -147,7 +206,7 @@ def complete_run(run_id: str, stories: list[EvaluatedStory], briefing_path: str)
     avg = sum(s["eval_score"] for s in stories) / len(stories) if stories else 0.0
     with _connect() as conn:
         conn.execute(
-            """UPDATE runs SET status='complete', finished_at=?, story_count=?,
+            """UPDATE runs SET status='complete', current_stage='done', finished_at=?, story_count=?,
                eval_score_avg=?, briefing_path=? WHERE id=?""",
             (now, len(stories), round(avg, 2), briefing_path, run_id),
         )
@@ -167,11 +226,25 @@ def list_runs() -> list[dict]:
     """Return all runs, newest first."""
     init_db()
     with _connect() as conn:
-        rows = conn.execute(
-            "SELECT id, status, started_at, finished_at, story_count, eval_score_avg, briefing_path "
-            "FROM runs ORDER BY started_at DESC"
-        ).fetchall()
-    return [dict(r) for r in rows]
+        # current_stage may not exist in older DBs — handle gracefully
+        try:
+            rows = conn.execute(
+                "SELECT id, status, current_stage, started_at, finished_at, "
+                "story_count, eval_score_avg, briefing_path "
+                "FROM runs ORDER BY started_at DESC"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = conn.execute(
+                "SELECT id, status, started_at, finished_at, "
+                "story_count, eval_score_avg, briefing_path "
+                "FROM runs ORDER BY started_at DESC"
+            ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d.setdefault("current_stage", None)
+        result.append(d)
+    return result
 
 
 def list_stories(*, run_id: str | None = None, tag: str | None = None) -> list[dict]:

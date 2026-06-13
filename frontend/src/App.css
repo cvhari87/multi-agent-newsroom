@@ -85,6 +85,46 @@ body {
   cursor: not-allowed;
 }
 
+.cancel-btn {
+  background: transparent;
+  color: var(--red);
+  border: 1px solid var(--red);
+  padding: 0.6rem 1.2rem;
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.cancel-btn:hover {
+  background: rgba(248, 113, 113, 0.15);
+}
+
+.stage-indicator {
+  margin-top: 0.75rem;
+  padding: 0.5rem 1.2rem;
+  background: rgba(108, 140, 255, 0.1);
+  border: 1px solid rgba(108, 140, 255, 0.25);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  color: var(--accent);
+  display: inline-block;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.stage-indicator.error {
+  background: rgba(248, 113, 113, 0.1);
+  border-color: rgba(248, 113, 113, 0.25);
+  color: var(--red);
+  animation: none;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 .run-status {
   color: var(--text-muted);
   font-size: 0.85rem;
@@ -393,6 +433,24 @@ body {
 .status-badge.failed {
   background: rgba(248, 113, 113, 0.15);
   color: var(--red);
+}
+
+.status-badge.cancelled {
+  background: rgba(139, 143, 163, 0.15);
+  color: var(--text-muted);
+}
+
+.stage-cell {
+  font-size: 0.8rem;
+}
+
+.stage-running {
+  color: var(--yellow);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.stage-done {
+  color: var(--text-muted);
 }
 
 .empty {

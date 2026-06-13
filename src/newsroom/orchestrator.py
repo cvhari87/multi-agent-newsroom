@@ -222,6 +222,6 @@ def _run_pipeline(run_id: str) -> str:
     db.update_stage(run_id, "output")
     print(f"[{_ts()}] 6/6  Output      — writing briefing file and persisting to SQLite…")
     path = output.run(final_stories, run_id)
-    print(f"[{_ts()}]      Pipeline complete in {time.monotonic() - pipeline_start:.1f}s → {path}")
+    print(f"[{_ts()}]      Pipeline complete in {time.monotonic() - pipeline_start:.1f}s -> {path}")
 
     return path

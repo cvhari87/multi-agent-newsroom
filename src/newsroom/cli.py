@@ -5,9 +5,11 @@ import sys
 from dotenv import load_dotenv
 
 from newsroom import orchestrator
+from newsroom.console import configure_console
 
 
 def main() -> None:
+    configure_console()
     load_dotenv()
     print("Multi-Agent Newsroom is ready.")
     print()

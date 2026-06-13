@@ -26,7 +26,7 @@ def run(stories: list[EvaluatedStory], run_id: str) -> str:
 
     for story in stories:
         score_str = f"{story['eval_score']:.1f}/10"
-        flag = " ⚠️" if story["eval_score"] < 5 else ""
+        flag = " [!]" if story["eval_score"] < 5 else ""
         tags = " · ".join(f"`{t}`" for t in story["topic_tags"])
 
         lines += [

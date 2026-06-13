@@ -1,7 +1,6 @@
 """Tests for the FastAPI endpoints — no real pipeline or Anthropic calls."""
 
 import json
-import sqlite3
 
 import pytest
 from fastapi.testclient import TestClient
@@ -133,3 +132,22 @@ def test_get_story_detail(client) -> None:
 def test_get_story_not_found(client) -> None:
     resp = client.get("/api/stories/nonexistent")
     assert resp.status_code == 404
+
+
+def test_background_pipeline_failure_marks_run_failed(monkeypatch) -> None:
+    from newsroom import api
+
+    db.create_run("run-1")
+    api._active_run = "run-1"
+    monkeypatch.setattr(
+        api.orchestrator,
+        "_run_pipeline",
+        lambda run_id: (_ for _ in ()).throw(RuntimeError("verification failed")),
+    )
+
+    api._run_in_background("run-1")
+
+    run = db.list_runs()[0]
+    assert run["status"] == "failed"
+    assert run["current_stage"] == "failed"
+    assert api._active_run is None
