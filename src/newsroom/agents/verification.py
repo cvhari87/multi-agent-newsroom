@@ -2,11 +2,15 @@
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import anthropic
 
 from newsroom.models import MODEL, RawStory, VerificationPacket, VerifiedStory
 from newsroom.structured import index_complete_results, parse_json_array, require_fields
+
+BATCH_SIZE = 12
+EVIDENCE_CHARS = 500
 
 SYSTEM_PROMPT = """\
 You are the Verification agent for an AI engineering newsletter.
@@ -38,12 +42,10 @@ Return a JSON array with exactly one object per input story:
 Return ONLY the JSON array."""
 
 
-def run(stories: list[RawStory]) -> list[VerificationPacket]:
-    if not stories:
-        return []
-
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
+def _verify_batch(
+    batch: list[RawStory], client: anthropic.Anthropic
+) -> dict[str, dict]:
+    """Verify a single batch of stories; returns results keyed by URL."""
     payload = json.dumps(
         [
             {
@@ -52,24 +54,37 @@ def run(stories: list[RawStory]) -> list[VerificationPacket]:
                 "summary": s["summary"],
                 "source": s["source_name"],
                 "evidence_status": s["evidence_status"],
-                "evidence_text": s["evidence_text"][:1500],
+                "evidence_text": s["evidence_text"][:EVIDENCE_CHARS],
             }
-            for s in stories
+            for s in batch
         ],
         indent=2,
     )
-
     msg = client.messages.create(
         model=MODEL,
-        max_tokens=4096,
+        max_tokens=2048,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": payload}],
     )
-
-    results = index_complete_results(
+    return index_complete_results(
         parse_json_array(msg.content[0].text),
-        (story["url"] for story in stories),
+        (s["url"] for s in batch),
     )
+
+
+def run(stories: list[RawStory]) -> list[VerificationPacket]:
+    if not stories:
+        return []
+
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    batches = [stories[i : i + BATCH_SIZE] for i in range(0, len(stories), BATCH_SIZE)]
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=min(len(batches), 4)) as pool:
+        futures = {pool.submit(_verify_batch, batch, client): batch for batch in batches}
+        for future in as_completed(futures):
+            results.update(future.result())
+
     by_url = {story["url"]: story for story in stories}
 
     packets: list[VerificationPacket] = []
