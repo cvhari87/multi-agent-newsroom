@@ -5,6 +5,7 @@ import os
 
 import anthropic
 
+from newsroom.llm import chat
 from newsroom.models import (
     MODEL,
     EvaluationPacket,
@@ -69,7 +70,8 @@ class NewsroomEditor:
         payload: str,
         expected_urls: list[str],
     ) -> list[ParentDecision]:
-        msg = self.client.messages.create(
+        msg = chat(
+            self.client,
             model=MODEL,
             max_tokens=2048,
             system=SYSTEM_PROMPT,

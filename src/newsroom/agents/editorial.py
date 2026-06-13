@@ -5,6 +5,7 @@ import os
 
 import anthropic
 
+from newsroom.llm import chat
 from newsroom.models import MODEL, EditorialPacket, EditorialStory, VerifiedStory
 
 MAX_STORIES = 8
@@ -66,7 +67,8 @@ def run(stories: list[VerifiedStory]) -> list[EditorialPacket]:
         indent=2,
     )
 
-    msg = client.messages.create(
+    msg = chat(
+        client,
         model=MODEL,
         max_tokens=4096,
         system=SYSTEM_PROMPT,

@@ -62,12 +62,15 @@ def _run_pipeline(run_id: str) -> str:
     )
 
     decision_map = {d["url"]: d for d in ver_decisions}
+    MAX_TO_EDITORIAL = 20
     accepted = [
         p["story"]
         for p in ver_packets
         if decision_map.get(p["story"]["url"], {}).get("action") == "accept"
     ]
-    print(f"     {len(accepted)} accepted, {len(raw) - len(accepted)} rejected by editor")
+    accepted.sort(key=lambda s: s["confidence_score"], reverse=True)
+    accepted = accepted[:MAX_TO_EDITORIAL]
+    print(f"     {len(accepted)} accepted (capped at {MAX_TO_EDITORIAL}), {len(raw) - len(accepted)} rejected/pruned")
 
     if not accepted:
         print("     No stories passed verification. Exiting.")

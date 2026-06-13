@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import anthropic
 
+from newsroom.llm import chat
 from newsroom.models import MODEL, RawStory, VerificationPacket, VerifiedStory
 from newsroom.structured import index_complete_results, parse_json_array, require_fields
 
@@ -60,7 +61,8 @@ def _verify_batch(
         ],
         indent=2,
     )
-    msg = client.messages.create(
+    msg = chat(
+        client,
         model=MODEL,
         max_tokens=2048,
         system=SYSTEM_PROMPT,

@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import anthropic
 
 from newsroom.citations import citation_issues
+from newsroom.llm import chat
 from newsroom.models import MODEL, EditorialStory, WritingPacket, WrittenStory
 
 SYSTEM_PROMPT = """\
@@ -60,7 +61,8 @@ def _write_one(
     if feedback and story["url"] in feedback:
         user_parts.append(f"\nRevision instructions:\n{feedback[story['url']]}")
 
-    msg = client.messages.create(
+    msg = chat(
+        client,
         model=MODEL,
         max_tokens=1024,
         system=SYSTEM_PROMPT,

@@ -8,7 +8,22 @@ import anthropic
 import feedparser
 import httpx
 
+from newsroom.llm import chat
 from newsroom.models import MODEL, RawStory
+
+_AI_KEYWORDS = {
+    "ai", "ml", "llm", "gpt", "claude", "gemini", "model", "neural",
+    "machine learning", "deep learning", "training", "inference",
+    "transformer", "benchmark", "dataset", "fine-tun", "rag", "agent",
+    "embedding", "diffusion", "gpu", "cuda", "foundation model",
+    "language model", "generative", "openai", "anthropic", "mistral",
+    "llama", "hugging face",
+}
+
+
+def _is_ai_relevant(story: RawStory) -> bool:
+    text = f"{story['title']} {story['summary']}".lower()
+    return any(kw in text for kw in _AI_KEYWORDS)
 
 SOURCES: list[tuple[str, str]] = [
     ("The Batch",    "https://www.deeplearning.ai/the-batch/feed/"),
@@ -87,7 +102,8 @@ def _fetch_feed(source: tuple[str, str]) -> list[RawStory]:
 
 
 def _summarize(client: anthropic.Anthropic, story: RawStory, text: str) -> str:
-    msg = client.messages.create(
+    msg = chat(
+        client,
         model=MODEL,
         max_tokens=256,
         system=SUMMARIZE_SYSTEM,
@@ -156,5 +172,12 @@ def run() -> list[RawStory]:
                         }
                     )
                 )
+
+    # --- prune articles that aren't AI-relevant ---
+    before = len(enriched)
+    enriched = [s for s in enriched if _is_ai_relevant(s)]
+    pruned = before - len(enriched)
+    if pruned:
+        print(f"     Pruned {pruned} non-AI articles before verification")
 
     return enriched
