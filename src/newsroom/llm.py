@@ -12,18 +12,23 @@ _BASE_DELAY = 2.0
 _CALL_TIMEOUT = 60.0
 
 
-def chat(client: anthropic.Anthropic, **kwargs) -> anthropic.types.Message:
-    """Call client.messages.create with a 60s timeout, retrying on rate limits and timeouts."""
+def chat(
+    client: anthropic.Anthropic,
+    *,
+    max_retries: int = MAX_RETRIES,
+    **kwargs,
+) -> anthropic.types.Message:
+    """Call Claude with a timeout, retrying on rate limits and timeouts."""
     kwargs.setdefault("timeout", _CALL_TIMEOUT)
-    for attempt in range(MAX_RETRIES + 1):
+    for attempt in range(max_retries + 1):
         try:
             return client.messages.create(**kwargs)
-        except anthropic.APITimeoutError:
-            if attempt == MAX_RETRIES:
+        except (anthropic.APITimeoutError, anthropic.APIStatusError) as exc:
+            if isinstance(exc, anthropic.APIStatusError) and exc.status_code not in (429, 529):
                 raise
-        except anthropic.APIStatusError as exc:
-            if exc.status_code not in (429, 529) or attempt == MAX_RETRIES:
+            if attempt == max_retries:
                 raise
-        delay = _BASE_DELAY * (2**attempt) + random.uniform(0, 1)
-        time.sleep(delay)
+            delay = _BASE_DELAY * (2**attempt) + random.uniform(0, 1)
+            print(f"     ⚠ Claude retry {attempt + 1}/{max_retries} in {delay:.1f}s ({type(exc).__name__})", flush=True)
+            time.sleep(delay)
     raise RuntimeError("unreachable")  # satisfies type checkers

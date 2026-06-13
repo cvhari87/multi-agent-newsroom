@@ -155,12 +155,17 @@ def run() -> list[RawStory]:
     # --- summarize each article in parallel ---
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
+    print(f"     Enriching {len(stories)} articles…")
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(_enrich, client, s): s for s in stories}
         enriched: list[RawStory] = []
+        done = 0
         for future in as_completed(futures):
+            done += 1
             try:
-                enriched.append(future.result())
+                result = future.result()
+                enriched.append(result)
+                print(f"     {done}/{len(stories)} enriched ({result['evidence_status']}): {result['title'][:60]}", flush=True)
             except Exception:
                 original = futures[future]
                 enriched.append(
@@ -172,6 +177,7 @@ def run() -> list[RawStory]:
                         }
                     )
                 )
+                print(f"     {done}/{len(stories)} enriched (fallback): {original['title'][:60]}", flush=True)
 
     # --- prune articles that aren't AI-relevant ---
     before = len(enriched)

@@ -103,19 +103,22 @@ def run(
 ) -> list[WritingPacket]:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
+    print(f"     Writing {len(stories)} briefings…")
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {
             pool.submit(_write_one, client, s, feedback, revision_number): s
             for s in stories
         }
         results: dict[str, WritingPacket] = {}
+        done = 0
         for future in as_completed(futures):
             story = futures[future]
+            done += 1
             try:
                 packet = future.result()
                 results[story["url"]] = packet
+                print(f"     {done}/{len(stories)} written: {story['title'][:60]}", flush=True)
             except Exception as exc:
-                # keep story moving with empty briefing rather than crash
                 results[story["url"]] = WritingPacket(
                     story=WrittenStory(
                         **story,
@@ -124,6 +127,7 @@ def run(
                     ),
                     revision_number=revision_number,
                 )
+                print(f"     {done}/{len(stories)} failed: {story['title'][:60]} — {exc!s:.80}", flush=True)
 
     # return in original order
     return [results[s["url"]] for s in stories if s["url"] in results]
