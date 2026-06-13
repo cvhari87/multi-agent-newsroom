@@ -9,7 +9,7 @@ import feedparser
 import httpx
 
 from newsroom.llm import chat
-from newsroom.models import MODEL, RawStory
+from newsroom.models import FAST_MODEL, RawStory
 
 _AI_KEYWORDS = {
     "ai", "ml", "llm", "gpt", "claude", "gemini", "model", "neural",
@@ -104,7 +104,7 @@ def _fetch_feed(source: tuple[str, str]) -> list[RawStory]:
 def _summarize(client: anthropic.Anthropic, story: RawStory, text: str) -> str:
     msg = chat(
         client,
-        model=MODEL,
+        model=FAST_MODEL,
         max_tokens=256,
         system=SUMMARIZE_SYSTEM,
         messages=[

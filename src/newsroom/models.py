@@ -3,6 +3,7 @@
 from typing import TypedDict
 
 MODEL = "claude-sonnet-4-6"
+FAST_MODEL = "claude-haiku-4-5-20251001"
 
 # ---------------------------------------------------------------------------
 # Story progression — each stage extends the previous
