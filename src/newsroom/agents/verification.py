@@ -43,6 +43,17 @@ Return a JSON array with exactly one object per input story:
 Return ONLY the JSON array."""
 
 
+def _default_result(story: RawStory) -> dict:
+    """Fallback result used when a batch call fails."""
+    return {
+        "url": story["url"],
+        "confidence_score": 0.5,
+        "supporting_urls": [story["url"]],
+        "recommendation": "accept",
+        "caveats": ["Verification unavailable — default score assigned"],
+    }
+
+
 def _verify_batch(
     batch: list[RawStory], client: anthropic.Anthropic
 ) -> dict[str, dict]:
@@ -64,7 +75,7 @@ def _verify_batch(
     msg = chat(
         client,
         model=FAST_MODEL,
-        max_tokens=2048,
+        max_tokens=4096,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": payload}],
     )
@@ -81,11 +92,21 @@ def run(stories: list[RawStory]) -> list[VerificationPacket]:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
     batches = [stories[i : i + BATCH_SIZE] for i in range(0, len(stories), BATCH_SIZE)]
+    print(f"     Verifying {len(stories)} articles in {len(batches)} batch(es) of ≤{BATCH_SIZE}…")
     results: dict[str, dict] = {}
+    completed = 0
     with ThreadPoolExecutor(max_workers=min(len(batches), 4)) as pool:
         futures = {pool.submit(_verify_batch, batch, client): batch for batch in batches}
         for future in as_completed(futures):
-            results.update(future.result())
+            batch = futures[future]
+            try:
+                results.update(future.result())
+            except Exception as exc:
+                print(f"     ⚠ Batch failed ({exc!s:.120}); using default scores for {len(batch)} stories")
+                for story in batch:
+                    results[story["url"]] = _default_result(story)
+            completed += 1
+            print(f"     ✓ Batch {completed}/{len(batches)} done ({len(results)}/{len(stories)} articles verified)")
 
     by_url = {story["url"]: story for story in stories}
 
