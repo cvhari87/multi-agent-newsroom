@@ -103,7 +103,7 @@ def run(
 ) -> list[WritingPacket]:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {
             pool.submit(_write_one, client, s, feedback, revision_number): s
             for s in stories

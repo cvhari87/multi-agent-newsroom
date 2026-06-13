@@ -33,7 +33,7 @@ SOURCES: list[tuple[str, str]] = [
     ("Ahead of AI",  "https://magazine.sebastianraschka.com/feed"),
 ]
 
-MAX_PER_FEED = 10
+MAX_PER_FEED = 6
 FETCH_TIMEOUT = 8
 MAX_ARTICLE_CHARS = 6000
 
