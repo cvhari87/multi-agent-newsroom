@@ -157,3 +157,68 @@ def complete_run(run_id: str, stories: list[EvaluatedStory], briefing_path: str)
         "completed",
         {"story_count": len(stories), "briefing_path": briefing_path},
     )
+
+
+# ---------------------------------------------------------------------------
+# Read helpers — used by the API layer
+# ---------------------------------------------------------------------------
+
+def list_runs() -> list[dict]:
+    """Return all runs, newest first."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, status, started_at, finished_at, story_count, eval_score_avg, briefing_path "
+            "FROM runs ORDER BY started_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_stories(*, run_id: str | None = None, tag: str | None = None) -> list[dict]:
+    """Return story cards. Defaults to the most recent completed run."""
+    init_db()
+    with _connect() as conn:
+        if run_id is None:
+            row = conn.execute(
+                "SELECT id FROM runs WHERE status='complete' ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return []
+            run_id = row["id"]
+
+        rows = conn.execute(
+            "SELECT id, run_id, title, url, summary, angle, topic_tags, "
+            "eval_score, cross_source_count, confidence_score, published_at "
+            "FROM stories WHERE run_id=? ORDER BY eval_score DESC",
+            (run_id,),
+        ).fetchall()
+
+    stories = []
+    for r in rows:
+        d = dict(r)
+        d["topic_tags"] = json.loads(d["topic_tags"]) if d["topic_tags"] else []
+        d["source_count"] = d.pop("cross_source_count", 0)
+        if tag and tag not in d["topic_tags"]:
+            continue
+        stories.append(d)
+    return stories
+
+
+def get_story(story_id: str) -> dict | None:
+    """Return full story detail including briefing and citations."""
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT id, run_id, title, url, summary, angle, full_briefing, topic_tags, "
+            "sources_json, confidence_score, cross_source_count, eval_score, eval_notes, "
+            "published_at, created_at "
+            "FROM stories WHERE id=?",
+            (story_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    d["topic_tags"] = json.loads(d["topic_tags"]) if d["topic_tags"] else []
+    d["sources"] = json.loads(d["sources_json"]) if d["sources_json"] else []
+    del d["sources_json"]
+    return d
